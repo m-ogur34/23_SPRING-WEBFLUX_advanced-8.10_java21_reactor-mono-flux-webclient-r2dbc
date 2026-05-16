@@ -1,0 +1,17 @@
+spring:
+  r2dbc:
+    url: r2dbc:h2:mem:///webfluxdb;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+
+server:
+  port: 8080
+
+logging:
+  level:
+    org.springframework.r2dbc: DEBUG
+    reactor.netty: INFO
