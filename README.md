@@ -240,20 +240,26 @@ StepVerifier.create(service.findById(1L))
 
 ## Mülakat Soruları
 
-**Q: `flatMap` vs `concatMap` farkı?**
-A: `flatMap` paralel — tüm iç Publisher'ları aynı anda başlatır, sıra garantisi yok. `concatMap` sıralı — önceki biter, sonraki başlar. Sıra önemliyse `concatMap`.
+**Q: `flatMap` vs `concatMap` vs `switchMap` farkı nedir?**
+A: `flatMap`: Her eleman için yeni bir Publisher başlatır, hepsi paralel çalışır — sıra garantisi yok, yüksek throughput. `concatMap`: Sıralı — önceki Publisher tamamlanmadan sonraki başlamaz, sıra garantili ama yavaş. `switchMap`: Yeni eleman gelince önceki işlemi iptal eder — arama kutusunda her tuş vuruşu önceki HTTP isteğini iptal etmek için ideal. Seçim kuralı: DB birden fazla kaydı paralel yükle → `flatMap`; dosyaları sırayla işle → `concatMap`; kullanıcı input → `switchMap`.
 
-**Q: WebFlux neden her durumda MVC'den iyi değil?**
-A: CPU-bound işlerde fark yok. I/O-bound + yüksek concurrency'de WebFlux kazanır. Öğrenmesi zor, debug'ı karmaşık, ekip bilgisi gerekir.
+**Q: WebFlux neden her durumda Spring MVC'den iyi değil?**
+A: WebFlux I/O-bound yüksek concurrency için tasarlanmış: event loop + non-blocking I/O ile az thread ile çok istek. Spring MVC: thread-per-request, daha basit, debug kolay. CPU-bound işlerde (hesaplama, görüntü işleme) WebFlux avantaj sağlamaz — event loop thread'i bloklamak zararlı. Dezavantajlar: öğrenmesi zor (Mono/Flux operatör zinciri, stack trace okunması güç), hibernate/JDBC gibi blocking kütüphanelerle uyumsuz (R2DBC gerekir), ekip bilgisi gerekir. Kural: "Binlerce eş zamanlı uzun süreli bağlantı (SSE, WebSocket, chat) veya çok sayıda upstream API çağrısı" → WebFlux. Klasik REST + DB → MVC yeterli.
 
-**Q: `publishOn` vs `subscribeOn` farkı?**
-A: `subscribeOn` — üretimi hangi scheduler'da başlat. `publishOn` — bu noktadan sonraki operatörleri başka scheduler'a taşı. Blocking işlem için `Schedulers.boundedElastic()`.
+**Q: `publishOn` vs `subscribeOn` farkı nedir?**
+A: `subscribeOn`: Subscription başladığında (upstream) hangi Scheduler'da çalışacağını belirler — genellikle pipeline'ın en başına konulur, tüm upstream'i etkiler. `publishOn`: Bu operatörden sonraki downstream operatörleri başka Scheduler'a taşır — pipeline içinde context switch. Kullanım: Blocking I/O yapan kodu event loop'tan ayırmak için `publishOn(Schedulers.boundedElastic())`. `Schedulers.boundedElastic()` → blocking uyumlu, thread havuzu büyüyebilir. `Schedulers.parallel()` → CPU-bound, CPU core sayısı kadar thread. `Schedulers.single()` → tek thread, sıralı.
 
-**Q: R2DBC neden Hibernate kadar yaygın değil?**
-A: Daha yeni, lazy loading yok, entity relationship desteği sınırlı. Basit query'ler için ideal, complex JPA mapping için zor.
+**Q: R2DBC neden Hibernate kadar yaygın değil? Ne zaman tercih edilir?**
+A: R2DBC sınırlılıkları: Lazy loading yok (N+1 için `@EntityGraph` benzeri yok), entity relationship mapping sınırlı (`@OneToMany` otomatik JOIN yok), ekosistem daha küçük, complex query desteği zayıf. Hibernate: JPQL, Criteria API, entity graph, 2nd level cache, mature ecosystem. Tercih: WebFlux + tamamen non-blocking uygulama → R2DBC. Eğer JPA gerekiyorsa `publishOn(Schedulers.boundedElastic())` ile blocking JPA thread'ını event loop'tan ayır (tavsiye edilmez ama mümkün). Karar: Microservice, basit CRUD, yüksek concurrency → R2DBC. Complex domain model, raporlama, ORM özellikleri → JPA + Spring MVC.
 
-**Q: StepVerifier neden kullanılır?**
-A: Reaktif stream'lerin `block()` olmadan test edilmesi için. `expectNext`, `expectError`, `verifyComplete` ile akışı adım adım doğrular.
+**Q: Reactor'da backpressure nedir? Ne zaman sorun olur?**
+A: Backpressure: Producer tüketenden hızlı üretince downstream'in "yavaşla" sinyali gönderebilmesi. Project Reactor'da Reactive Streams standardı — consumer `request(N)` ile kaç eleman istediğini bildirir. Sorun: SSE stream'de client bağlantısı yavaş ama server her 500ms event üretiyorsa buffer dolabilir. Çözüm: `onBackpressureBuffer(1000)` — 1000 aşılınca DROP. `onBackpressureDrop()` — yeni geleni at. `onBackpressureLatest()` — sadece son değeri tut. WebFlux HTTP: HTTP protokolü flow control mekanizması sayesinde genellikle otomatik yönetilir.
+
+**Q: Functional endpoint neden `@RestController`'a tercih edilir?**
+A: Functional endpoint (Router + Handler): Request matching kodu Java'da, compile-time doğrulama, daha kolay unit test (Handler'ı Spring context olmadan test et). `@RestController`: Tanıdık, az kod, reflection tabanlı mapping. Test farkı: Functional → `handler.getById(serverRequest)` direkt çağrılır, `@RestController` → `@WebFluxTest` + `WebTestClient` gerekir. WebFlux'ta ikisi de çalışır; büyük takımlarda `@RestController` daha anlaşılır, performans farkı yok.
+
+**Q: Reaktif pipeline'da hata yönetimi nasıl yapılır?**
+A: `onErrorReturn(default)`: Hata gelince sabit bir değer döndür — fallback için. `onErrorResume(ex -> fallback())`: Hata gelince başka bir Publisher'a geç — fallback service call. `onErrorMap(ex -> new AppEx(ex))`: Hata tipini dönüştür — domain exception wrapping. `retry(3)`: Hata durumunda 3 kez tekrar dene — geçici ağ hatası için. `retryWhen(Retry.backoff(3, Duration.ofMillis(500)))`: Exponential backoff ile retry. Dikkat: `onErrorReturn` hataları yutar — loglama için `doOnError()` ile birlikte kullan. `StepVerifier.create(...).expectError(RuntimeException.class).verify()` ile test et.
 
 ---
 
